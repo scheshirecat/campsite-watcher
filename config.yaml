@@ -25,5 +25,5 @@ trips: []
 campgrounds:
   kirk_creek: true              # Recreation.gov, Big Sur
   kirby_cove: true              # Recreation.gov, Marin Headlands
-  steep_ravine_campsites: true  # ReserveCalifornia, Mt. Tamalpais (tent sites)
-  steep_ravine_cabins: true     # ReserveCalifornia, Mt. Tamalpais (cabins)
+  steep_ravine_campsites: false # ReserveCalifornia, Mt. Tamalpais (tent sites)
+  steep_ravine_cabins: false    # ReserveCalifornia, Mt. Tamalpais (cabins)
