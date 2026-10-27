@@ -121,11 +121,54 @@ class Opening:
 # Config
 # --------------------------------------------------------------------------
 
-def load_config(path: Path = CONFIG_PATH) -> tuple[list[Trip], list[str]]:
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+def add_months(d: date, months: int) -> date:
+    month_index = d.month - 1 + months
+    year, month = d.year + month_index // 12, month_index % 12 + 1
+    # Clamp the day for shorter months (e.g. Aug 31 + 6 months -> Feb 28).
+    for day in (d.day, 30, 29, 28):
+        try:
+            return date(year, month, day)
+        except ValueError:
+            continue
+    raise ValueError(d)
+
+
+def weekly_trips(spec: dict, today: date) -> list[Trip]:
+    """Every chosen night of the week from today through `months_ahead` months out."""
+    days = spec.get("nights") or []
+    if isinstance(days, str):
+        days = [days]
+    wanted = set()
+    for d in days:
+        name = str(d).strip().lower()
+        if name not in WEEKDAYS:
+            raise SystemExit(f"config.yaml: '{d}' under every_week isn't a day of the week.")
+        wanted.add(WEEKDAYS.index(name))
+    try:
+        months = int(spec.get("months_ahead", 6))
+        length = int(spec.get("nights_per_stay", 1))
+    except (TypeError, ValueError):
+        raise SystemExit("config.yaml: months_ahead and nights_per_stay must be numbers.")
+    end = add_months(today, months)
+    out, d = [], today
+    while d <= end:
+        if d.weekday() in wanted:
+            out.append(Trip(d, length))
+        d += timedelta(days=1)
+    return out
+
+
+def load_config(path: Path = CONFIG_PATH, today: date | None = None) -> tuple[list[Trip], list[str]]:
     raw = yaml.safe_load(path.read_text()) or {}
-    today = datetime.now(PACIFIC).date()
+    today = today or datetime.now(PACIFIC).date()
 
     trips: list[Trip] = []
+    if raw.get("every_week"):
+        trips.extend(weekly_trips(raw["every_week"], today))
+
     for i, t in enumerate(raw.get("trips") or [], start=1):
         try:
             check_in = t["check_in"]
@@ -141,6 +184,7 @@ def load_config(path: Path = CONFIG_PATH) -> tuple[list[Trip], list[str]]:
             print(f"Skipping trip on {check_in}: it's in the past.")
             continue
         trips.append(Trip(check_in, nights))
+    trips = sorted(set(trips), key=lambda t: (t.check_in, t.nights))
 
     enabled_raw = raw.get("campgrounds") or {}
     unknown = set(enabled_raw) - set(CAMPGROUNDS)
@@ -209,11 +253,16 @@ def merge_recgov_month(sites: dict[str, Site], payload: dict) -> None:
 def fetch_reservecal(place: int, facility: int, trips: list[Trip]) -> dict[str, Site]:
     sites: dict[str, Site] = {}
     booking_url = RESERVECAL_BOOKING_URL.format(place=place, facility=facility)
-    for trip in trips:
+    # One request per calendar month that has nights we care about, so watching
+    # every weekend for months costs a handful of requests, not dozens.
+    by_month: dict[date, list[date]] = {}
+    for d in sorted({n for t in trips for n in t.night_dates}):
+        by_month.setdefault(d.replace(day=1), []).append(d)
+    for nights in by_month.values():
         body = {
             "FacilityId": facility,
-            "StartDate": trip.check_in.strftime("%m-%d-%Y"),
-            "EndDate": trip.night_dates[-1].strftime("%m-%d-%Y"),
+            "StartDate": nights[0].strftime("%m-%d-%Y"),
+            "EndDate": nights[-1].strftime("%m-%d-%Y"),
             "IsADA": False,
             "MinVehicleLength": 0,
             "UnitCategoryId": 0,
@@ -273,25 +322,44 @@ def campground_page(key: str) -> str:
     return RESERVECAL_BOOKING_URL.format(place=cg["place"], facility=cg["facility"])
 
 
+MAX_DATES_IN_MESSAGE = 5
+
+
 def format_alerts(openings: list[Opening]) -> list[tuple[str, list[Opening]]]:
-    """One short text per campground + trip, so each message has one clear link.
+    """One short message per campground, so a busy run doesn't flood your phone.
     Returns (message, openings covered by that message) pairs."""
-    groups: dict[tuple[str, Trip], list[Opening]] = {}
+    by_campground: dict[str, list[Opening]] = {}
     for o in openings:
-        groups.setdefault((o.campground_key, o.trip), []).append(o)
+        by_campground.setdefault(o.campground_key, []).append(o)
 
     messages: list[tuple[str, list[Opening]]] = []
-    for (cg_key, trip), group in sorted(groups.items(), key=lambda g: (g[0][1].check_in, g[0][0])):
+    for cg_key in CAMPGROUNDS:  # stable, readable order
+        group = by_campground.get(cg_key)
+        if not group:
+            continue
         name = CAMPGROUNDS[cg_key]["name"]
-        names = sorted(o.site_name for o in group)
-        if len(group) == 1:
-            what = f"{names[0]} is open"
-            link = group[0].url
+        trips = sorted({o.trip for o in group}, key=lambda t: (t.check_in, t.nights))
+
+        if len(trips) == 1:
+            trip = trips[0]
+            names = sorted(o.site_name for o in group)
+            if len(group) == 1:
+                what = f"{names[0]} is open"
+                link = group[0].url
+            else:
+                shown = ", ".join(names[:3]) + (f" +{len(names) - 3} more" if len(names) > 3 else "")
+                what = f"{len(group)} spots open ({shown})"
+                link = campground_page(cg_key)
+            text = f"Campsite alert! {name}: {what} for {trip.label()}. Book now: {link}"
         else:
-            shown = ", ".join(names[:3]) + (f" +{len(names) - 3} more" if len(names) > 3 else "")
-            what = f"{len(group)} spots open ({shown})"
-            link = campground_page(cg_key)
-        messages.append((f"Campsite alert! {name}: {what} for {trip.label()}. Book now: {link}", group))
+            all_one_night = all(t.nights == 1 for t in trips)
+            labels = [t.check_in.strftime("%a %b %-d") if all_one_night else t.label() for t in trips]
+            shown = ", ".join(labels[:MAX_DATES_IN_MESSAGE])
+            if len(labels) > MAX_DATES_IN_MESSAGE:
+                shown += f" +{len(labels) - MAX_DATES_IN_MESSAGE} more"
+            nights = " (1 night)" if all_one_night else ""
+            text = f"Campsite alert! {name} has openings: {shown}{nights}. Book now: {campground_page(cg_key)}"
+        messages.append((text, group))
     return messages
 
 
@@ -442,7 +510,10 @@ def main(argv: list[str] | None = None) -> int:
         print("No upcoming trips in config.yaml, nothing to check.")
         return 0
     print("Watching: " + ", ".join(CAMPGROUNDS[k]["name"] for k in enabled))
-    print("Trips: " + "; ".join(t.label() for t in trips))
+    if len(trips) <= 6:
+        print("Dates: " + "; ".join(t.label() for t in trips))
+    else:
+        print(f"Dates: {len(trips)} stays from {trips[0].label()} to {trips[-1].label()}")
 
     new_state = run_check(trips, enabled, load_state(), dry_run=args.dry_run)
     if not args.dry_run:
