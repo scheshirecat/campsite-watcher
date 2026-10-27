@@ -1,0 +1,23 @@
+# ---------------------------------------------------------------
+#  CAMPSITE WATCHER SETTINGS — this is the only file you need to edit
+# ---------------------------------------------------------------
+#
+# TRIPS: the nights you want to camp.
+#   check_in: the date you arrive (YYYY-MM-DD)
+#   nights:   how many nights you want to stay (default 1)
+#
+# You'll only be alerted if ONE site is free for EVERY night of the trip.
+# Add, remove or change trips any time; the change takes effect on the next check.
+
+trips:
+  - check_in: 2027-04-09
+    nights: 2
+  - check_in: 2027-05-14
+    nights: 1
+
+# CAMPGROUNDS: set any of these to false to stop watching it.
+campgrounds:
+  kirk_creek: true            # Recreation.gov, Big Sur
+  kirby_cove: true            # Recreation.gov, Marin Headlands
+  steep_ravine_campsites: true  # ReserveCalifornia, Mt. Tamalpais (tent sites)
+  steep_ravine_cabins: true     # ReserveCalifornia, Mt. Tamalpais (cabins)
