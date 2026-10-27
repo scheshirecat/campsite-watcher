@@ -69,6 +69,12 @@ RESERVECAL_GRID_URL = (
     "https://california-rdr.prod.cali.rd12.recreation-management.tylerapp.com/rdr/search/grid"
 )
 RESERVECAL_BOOKING_URL = "https://www.reservecalifornia.com/park/{place}/{facility}"
+# ReserveCalifornia's own pages send these with every availability request.
+RESERVECAL_HEADERS = {
+    "Origin": "https://www.reservecalifornia.com",
+    "Referer": "https://www.reservecalifornia.com/",
+    "Content-Type": "application/json",
+}
 
 HEADERS = {
     "User-Agent": (
@@ -199,19 +205,24 @@ def load_config(path: Path = CONFIG_PATH, today: date | None = None) -> tuple[li
 # Fetching availability
 # --------------------------------------------------------------------------
 
-def _request(method: str, url: str, **kwargs) -> requests.Response:
-    """HTTP request with a couple of polite retries."""
+def _request(method: str, url: str, extra_headers: dict | None = None, **kwargs) -> requests.Response:
+    """HTTP request with a couple of polite retries for temporary problems."""
+    headers = {**HEADERS, **(extra_headers or {})}
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            resp = requests.request(method, url, headers=HEADERS, timeout=25, **kwargs)
-            if resp.status_code == 429 or resp.status_code >= 500:
-                raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
-            resp.raise_for_status()
-            return resp
-        except requests.RequestException as e:
+            resp = requests.request(method, url, headers=headers, timeout=25, **kwargs)
+        except requests.RequestException as e:  # network hiccup: retry
             last_error = e
             time.sleep(3 * (attempt + 1))
+            continue
+        if resp.status_code == 429 or resp.status_code >= 500:  # busy or down: retry
+            last_error = requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
+            time.sleep(3 * (attempt + 1))
+            continue
+        if resp.status_code >= 400:  # refused: retrying won't help
+            raise RuntimeError(f"{method} {url} was refused (HTTP {resp.status_code}): {resp.text[:200]}")
+        return resp
     raise RuntimeError(f"{method} {url} failed: {last_error}")
 
 
@@ -272,7 +283,7 @@ def fetch_reservecal(place: int, facility: int, trips: list[Trip]) -> dict[str, 
             "UnitSort": "orderby",
             "InSeasonOnly": False,
         }
-        resp = _request("POST", RESERVECAL_GRID_URL, json=body)
+        resp = _request("POST", RESERVECAL_GRID_URL, json=body, extra_headers=RESERVECAL_HEADERS)
         merge_reservecal(sites, resp.json(), booking_url)
         time.sleep(1.5)
     return sites
